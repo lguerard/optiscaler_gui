@@ -1,9 +1,17 @@
-# License
+# Zero-Clause BSD
 
-This project is not distributed under an open source license at this time.
+Copyright (C) 2026 lguerard
 
-All rights are reserved by the repository owner unless explicit written permission is granted.
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted.
 
-You may review the source in this repository, but no permission is granted to copy, modify, distribute, sublicense, or sell this software except where required by applicable law or by separate written agreement.
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
 
-Third-party dependencies and assets remain under their own respective licenses.
+Third-party dependencies and assets remain under their own respective
+licenses.
