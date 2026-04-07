@@ -2,6 +2,7 @@
   "name": "optiscaler-gui",
   "private": true,
   "version": "0.1.0",
+  "license": "0BSD",
   "description": "Electron app for discovering games and automating OptiScaler installation.",
   "main": "dist/main/main.js",
   "scripts": {

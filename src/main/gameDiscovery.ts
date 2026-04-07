@@ -799,7 +799,11 @@ function decodeGenericUpscalerEnum(
   normalizedKey: string,
   numericValue: number,
 ): EnumGraphicsConfigResult | undefined {
-  if (!/(upscaler|upscale|super.?resolution|aa.?method|anti.?aliasing)/.test(normalizedKey)) {
+  if (
+    !/(upscaler|upscale|super.?resolution|aa.?method|anti.?aliasing)/.test(
+      normalizedKey,
+    )
+  ) {
     return undefined;
   }
 
@@ -855,7 +859,11 @@ function decodeGenericFrameGenerationEnum(
   normalizedKey: string,
   numericValue: number,
 ): EnumGraphicsConfigResult | undefined {
-  if (!/(frame|interpolation|generation|streamline|dlssg|xessfg)/.test(normalizedKey)) {
+  if (
+    !/(frame|interpolation|generation|streamline|dlssg|xessfg)/.test(
+      normalizedKey,
+    )
+  ) {
     return undefined;
   }
 
@@ -947,7 +955,11 @@ function decodeEngineSpecificFrameGenerationEnum(
       : { value: "DLSS Frame Generation", confidence: 4 };
   }
 
-  if (/fidelityfx.*fi|frameinterpolation|fsr3fi|amd fluid motion/.test(normalizedKey)) {
+  if (
+    /fidelityfx.*fi|frameinterpolation|fsr3fi|amd fluid motion/.test(
+      normalizedKey,
+    )
+  ) {
     return numericValue <= 0
       ? { value: "Off", confidence: 3 }
       : { value: "FSR 3 Frame Generation", confidence: 4 };
