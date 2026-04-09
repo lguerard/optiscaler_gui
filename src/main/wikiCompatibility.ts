@@ -219,12 +219,115 @@ function parseWikiTable(markdown: string): WikiPage {
   return { fields };
 }
 
+function normalizeFieldKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function getFieldValue(
+  fields: Map<string, string>,
+  aliases: string[],
+): string | undefined {
+  for (const alias of aliases) {
+    const direct = fields.get(alias);
+    if (direct) {
+      return direct;
+    }
+  }
+
+  const normalizedAliases = new Set(
+    aliases.map((alias) => normalizeFieldKey(alias)),
+  );
+  for (const [key, value] of fields) {
+    if (normalizedAliases.has(normalizeFieldKey(key))) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function combineFieldValues(
+  fields: Map<string, string>,
+  aliases: string[],
+): string | undefined {
+  const values = aliases
+    .map((alias) => getFieldValue(fields, [alias]))
+    .filter((value): value is string => Boolean(value && value !== "-"));
+
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  return Array.from(new Set(values)).join(" | ");
+}
+
 function parseList(value: string | undefined): string[] {
   if (!value || value === "-") return [];
   return value
-    .split(/[,/]/)
+    .split(/[\n,;|]|(?:^|\s)[*-]\s+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function inferUpscalerInputs(...values: Array<string | undefined>): string[] {
+  const combined = values.filter(Boolean).join(" ");
+  if (!combined) {
+    return [];
+  }
+
+  const inferred: string[] = [];
+  const matches: Array<[RegExp, string]> = [
+    [/\bdlss\b/i, "DLSS"],
+    [/\bfsr\s*4\b/i, "FSR4"],
+    [/\bfsr\s*3(?:\.1|\.0)?\b/i, "FSR3"],
+    [/\bfsr\s*2\b/i, "FSR2"],
+    [/\bxess\b/i, "XeSS"],
+    [/(?:\btsr\b|temporal super resolution)/i, "TSR"],
+  ];
+
+  for (const [pattern, label] of matches) {
+    if (pattern.test(combined)) {
+      inferred.push(label);
+    }
+  }
+
+  return inferred;
+}
+
+function inferFgInputs(...values: Array<string | undefined>): string[] {
+  const combined = values.filter(Boolean).join(" ");
+  if (!combined) {
+    return [];
+  }
+
+  const inferred: string[] = [];
+  const matches: Array<[RegExp, string]> = [
+    [
+      /(?:\bdlssg\b.*\bstreamline\b|\bstreamline\b.*\bdlssg\b)/i,
+      "DLSSG via Streamline",
+    ],
+    [
+      /(?:\bnukem'?s?\b.*\bdlssg\b|\bdlssg\b.*\bnukem'?s?\b|\bnukems\b)/i,
+      "Nukem's DLSSG",
+    ],
+    [
+      /(?:\bfsr\s*3(?:\.1|\.0)?\s*(?:fg|frame generation)\b|\bfsr\s*fg\b)/i,
+      "FSR 3 Frame Generation",
+    ],
+    [/(?:\boptifg\b|hudfix)/i, "OptiFG"],
+    [/(?:\bxefg\b|\bxemfg\b|\bxess frame generation\b)/i, "XeFG"],
+  ];
+
+  for (const [pattern, label] of matches) {
+    if (pattern.test(combined)) {
+      inferred.push(label);
+    }
+  }
+
+  return inferred;
 }
 
 function pickProxyFilename(
@@ -286,12 +389,40 @@ function buildRecommendation(
   const page = parseWikiTable(markdown);
   const fields = page.fields;
 
-  const recommendedProxy = pickProxyFilename(fields.get("Filename"));
-  const upscalerInputs = parseList(fields.get("Upscaler Inputs"));
-  const fgInputs = parseList(fields.get("FG Inputs"));
-  const settings = fields.get("Settings");
-  const knownIssues = fields.get("Known Issues");
-  const notes = fields.get("Notes");
+  const recommendedProxy = pickProxyFilename(
+    getFieldValue(fields, ["Filename", "Executable", "Exe"]),
+  );
+  const settings = combineFieldValues(fields, [
+    "Settings",
+    "FG-Settings",
+    "FG Settings",
+  ]);
+  const knownIssues = getFieldValue(fields, ["Known Issues", "Known Issue"]);
+  const notes = getFieldValue(fields, ["Notes", "Note"]);
+  const explicitUpscalerInputs = parseList(
+    getFieldValue(fields, [
+      "Upscaler Inputs",
+      "Upscaler Input",
+      "Upscaler Options",
+      "Upscalers",
+    ]),
+  );
+  const explicitFgInputs = parseList(
+    getFieldValue(fields, [
+      "FG Inputs",
+      "FG Input",
+      "Frame Generation Inputs",
+      "Frame Generation Input",
+    ]),
+  );
+  const upscalerInputs =
+    explicitUpscalerInputs.length > 0
+      ? explicitUpscalerInputs
+      : inferUpscalerInputs(settings, knownIssues, notes);
+  const fgInputs =
+    explicitFgInputs.length > 0
+      ? explicitFgInputs
+      : inferFgInputs(settings, knownIssues, notes);
 
   return {
     source: "wiki",
@@ -302,7 +433,7 @@ function buildRecommendation(
     suggestedOptiPatcher: inferOptiPatcher(fields),
     upscalerInputs: upscalerInputs.length > 0 ? upscalerInputs : undefined,
     fgInputs: fgInputs.length > 0 ? fgInputs : undefined,
-    settings: settings && settings !== "-" ? settings : undefined,
+    settings,
     knownIssues: knownIssues && knownIssues !== "-" ? knownIssues : undefined,
     notes: notes && notes !== "-" ? notes : undefined,
   };
