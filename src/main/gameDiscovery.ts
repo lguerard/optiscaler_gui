@@ -1317,7 +1317,75 @@ function walkForExecutables(
   return found;
 }
 
+function findUnrealEngineExecutable(folderPath: string): string | null {
+  const preferredRoots = [
+    path.join(folderPath, path.basename(folderPath), "Binaries"),
+    path.join(folderPath, "Binaries"),
+    path.join(folderPath, "Game", "Binaries"),
+  ];
+
+  const candidates: string[] = [];
+  for (const preferredRoot of preferredRoots) {
+    if (
+      !fs.existsSync(preferredRoot) ||
+      !fs.statSync(preferredRoot).isDirectory()
+    ) {
+      continue;
+    }
+
+    candidates.push(...walkForExecutables(preferredRoot, 3));
+  }
+
+  const uniqueCandidates = Array.from(new Set(candidates)).filter((entryPath) =>
+    isValidExecutableCandidate(entryPath, folderPath),
+  );
+  if (uniqueCandidates.length === 0) {
+    return null;
+  }
+
+  const folderName = path.basename(folderPath).toLowerCase();
+  uniqueCandidates.sort((left, right) => {
+    const leftBase = path.basename(left).toLowerCase();
+    const rightBase = path.basename(right).toLowerCase();
+    const leftRelative = path.relative(folderPath, left).toLowerCase();
+    const rightRelative = path.relative(folderPath, right).toLowerCase();
+
+    const scoreCandidate = (baseName: string, relativePath: string): number => {
+      let score = 0;
+      if (baseName.endsWith("-win64-shipping.exe")) score += 120;
+      if (baseName.endsWith("-shipping.exe")) score += 80;
+      if (
+        relativePath.includes(
+          `${path.sep.toLowerCase()}binaries${path.sep.toLowerCase()}win64`,
+        )
+      )
+        score += 60;
+      if (
+        relativePath.includes(
+          `${path.sep.toLowerCase()}binaries${path.sep.toLowerCase()}wingdk`,
+        )
+      )
+        score += 60;
+      if (baseName.includes(folderName)) score += 30;
+      if (baseName === `${folderName}-win64-shipping.exe`) score += 40;
+      return score;
+    };
+
+    return (
+      scoreCandidate(rightBase, rightRelative) -
+      scoreCandidate(leftBase, leftRelative)
+    );
+  });
+
+  return uniqueCandidates[0] ?? null;
+}
+
 function findPrimaryExecutable(folderPath: string): string | null {
+  const unrealExecutable = findUnrealEngineExecutable(folderPath);
+  if (unrealExecutable) {
+    return unrealExecutable;
+  }
+
   const folderName = path.basename(folderPath);
   const immediateExecutables = safeReadDir(folderPath)
     .filter(
