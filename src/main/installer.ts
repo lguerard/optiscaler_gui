@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import extract from "extract-zip";
+import sevenZipBinaryPath from "7zip-bin";
 import type {
   InstallOptions,
   InstallProgress,
@@ -14,6 +17,8 @@ const OPTISCALER_RELEASE =
 const OPTIPATCHER_ASSET =
   "https://github.com/optiscaler/OptiPatcher/releases/download/rolling/OptiPatcher.asi";
 const BACKUP_FOLDER = ".optiscaler-backup";
+const ORIGINAL_STATE_FOLDER = "original-state";
+const execFileAsync = promisify(execFile);
 
 interface BackupManifest {
   installedAt: string;
@@ -25,16 +30,20 @@ interface BackupManifest {
   notes: string[];
   backedUpEntries: string[];
   createdEntries: string[];
+  preserveOriginalState?: boolean;
 }
 
 export interface PayloadLocation {
   root: string;
   dllPath: string;
+  releaseName: string;
 }
 
 export interface InstallerProgressSink {
   report: (progress: InstallProgress) => void;
 }
+
+let preparedPayloadPromise: Promise<PayloadLocation> | null = null;
 
 async function ensureDirectory(directoryPath: string): Promise<void> {
   await fs.promises.mkdir(directoryPath, { recursive: true });
@@ -95,10 +104,17 @@ async function downloadLatestReleaseArchive(): Promise<{
   };
 
   const asset =
-    release.assets.find((item) => /\.(zip|7z|rar)$/i.test(item.name)) ??
+    release.assets.find((item) => /\.zip$/i.test(item.name)) ??
+    release.assets.find((item) => /\.7z$/i.test(item.name)) ??
     release.assets[0];
   if (!asset) {
     throw new Error("No downloadable release asset was found for OptiScaler.");
+  }
+
+  if (!/\.(zip|7z)$/i.test(asset.name)) {
+    throw new Error(
+      `Unsupported OptiScaler release asset format: ${asset.name}. Expected a .zip or .7z archive.`,
+    );
   }
 
   const cacheDir = path.join(os.tmpdir(), "optiscaler-gui");
@@ -109,6 +125,18 @@ async function downloadLatestReleaseArchive(): Promise<{
   return { archivePath, releaseName: release.name ?? release.tag_name };
 }
 
+async function extractSevenZipArchive(
+  archivePath: string,
+  extractedRoot: string,
+): Promise<void> {
+  await execFileAsync(sevenZipBinaryPath.path7za, [
+    "x",
+    archivePath,
+    `-o${extractedRoot}`,
+    "-y",
+  ]);
+}
+
 async function extractArchiveToTemp(archivePath: string): Promise<string> {
   const extractedRoot = path.join(
     path.dirname(archivePath),
@@ -116,7 +144,18 @@ async function extractArchiveToTemp(archivePath: string): Promise<string> {
   );
   await fs.promises.rm(extractedRoot, { recursive: true, force: true });
   await ensureDirectory(extractedRoot);
-  await extract(archivePath, { dir: extractedRoot });
+
+  const extension = path.extname(archivePath).toLowerCase();
+  if (extension === ".zip") {
+    await extract(archivePath, { dir: extractedRoot });
+  } else if (extension === ".7z") {
+    await extractSevenZipArchive(archivePath, extractedRoot);
+  } else {
+    throw new Error(
+      `Unsupported archive format for extraction: ${path.basename(archivePath)}`,
+    );
+  }
+
   return extractedRoot;
 }
 
@@ -150,6 +189,7 @@ async function findFileRecursive(
 
 async function findPayloadRoot(
   extractedRoot: string,
+  releaseName: string,
 ): Promise<PayloadLocation> {
   const dllPath = await findFileRecursive(extractedRoot, "OptiScaler.dll");
   if (!dllPath) {
@@ -159,7 +199,48 @@ async function findPayloadRoot(
   return {
     root: path.dirname(dllPath),
     dllPath,
+    releaseName,
   };
+}
+
+async function prepareLatestPayload(
+  sink?: InstallerProgressSink,
+): Promise<PayloadLocation> {
+  if (!preparedPayloadPromise) {
+    preparedPayloadPromise = (async () => {
+      sink?.report({
+        phase: "download",
+        message: "Fetching latest OptiScaler release",
+        done: 1,
+        total: 6,
+      });
+      const { archivePath, releaseName } = await downloadLatestReleaseArchive();
+
+      sink?.report({
+        phase: "extract",
+        message: `Extracting ${releaseName}`,
+        done: 2,
+        total: 6,
+      });
+      const extractedRoot = await extractArchiveToTemp(archivePath);
+      return findPayloadRoot(extractedRoot, releaseName);
+    })().catch((error) => {
+      preparedPayloadPromise = null;
+      throw error;
+    });
+  }
+
+  const payload = await preparedPayloadPromise;
+  if (sink && payload.releaseName) {
+    sink.report({
+      phase: "extract",
+      message: `Using ${payload.releaseName}`,
+      done: 2,
+      total: 6,
+    });
+  }
+
+  return payload;
 }
 
 async function copyDirectoryRecursive(
@@ -235,6 +316,54 @@ async function removePathIfPresent(targetPath: string): Promise<void> {
   }
 }
 
+async function loadBackupManifest(
+  backupRoot: string,
+): Promise<BackupManifest | null> {
+  const manifestPath = path.join(backupRoot, "manifest.json");
+  if (!(await pathExists(manifestPath))) {
+    return null;
+  }
+
+  return JSON.parse(
+    await fs.promises.readFile(manifestPath, "utf8"),
+  ) as BackupManifest;
+}
+
+interface BackupSnapshot {
+  root: string;
+  name: string;
+  manifest: BackupManifest;
+}
+
+async function getBackupSnapshots(gamePath: string): Promise<BackupSnapshot[]> {
+  const backupFolder = path.join(gamePath, BACKUP_FOLDER);
+  const folders: fs.Dirent[] = await fs.promises
+    .readdir(backupFolder, { withFileTypes: true })
+    .catch(() => [] as fs.Dirent[]);
+
+  const snapshots = await Promise.all(
+    folders
+      .filter((entry: fs.Dirent) => entry.isDirectory())
+      .map(async (entry: fs.Dirent) => {
+        const root = path.join(backupFolder, entry.name);
+        const manifest = await loadBackupManifest(root);
+        if (!manifest) {
+          return null;
+        }
+
+        return {
+          root,
+          name: entry.name,
+          manifest,
+        } satisfies BackupSnapshot;
+      }),
+  );
+
+  return snapshots.filter((snapshot): snapshot is BackupSnapshot =>
+    Boolean(snapshot),
+  );
+}
+
 async function restorePathRecursive(
   backupPath: string,
   targetPath: string,
@@ -300,27 +429,76 @@ function normalizeProxyFilename(proxyFilename: ProxyFilename): ProxyFilename {
   return proxyFilename;
 }
 
+async function createOriginalStateSnapshot(
+  gamePath: string,
+  proxyFilename: ProxyFilename,
+  payloadEntries: fs.Dirent[],
+): Promise<void> {
+  const backupFolder = path.join(gamePath, BACKUP_FOLDER);
+  const originalRoot = path.join(backupFolder, ORIGINAL_STATE_FOLDER);
+  if (await pathExists(path.join(originalRoot, "manifest.json"))) {
+    return;
+  }
+
+  await ensureDirectory(backupFolder);
+  const existingSnapshots = (await getBackupSnapshots(gamePath))
+    .filter((snapshot) => snapshot.name !== ORIGINAL_STATE_FOLDER)
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  if (existingSnapshots.length > 0) {
+    await fs.promises.cp(existingSnapshots[0]!.root, originalRoot, {
+      recursive: true,
+    });
+    return;
+  }
+
+  await ensureDirectory(originalRoot);
+  const backedUpEntries = new Set<string>();
+  const createdEntries = new Set<string>();
+
+  for (const entry of payloadEntries) {
+    const targetPath = path.join(gamePath, entry.name);
+    if (await pathExists(targetPath)) {
+      await backupPath(targetPath, originalRoot);
+      backedUpEntries.add(entry.name);
+    } else {
+      createdEntries.add(entry.name);
+    }
+  }
+
+  const targetDll = path.join(gamePath, proxyFilename);
+  if (await pathExists(targetDll)) {
+    await backupFile(targetDll, originalRoot);
+    backedUpEntries.add(proxyFilename);
+  } else {
+    createdEntries.add(proxyFilename);
+  }
+
+  const manifest: BackupManifest = {
+    installedAt: new Date().toISOString(),
+    gamePath,
+    proxyFilename,
+    backupRoot: originalRoot,
+    sourceRoot: gamePath,
+    releaseName: "original-state",
+    notes: ["Captured the original game state before OptiScaler changes."],
+    backedUpEntries: Array.from(backedUpEntries).sort(),
+    createdEntries: Array.from(createdEntries).sort(),
+    preserveOriginalState: true,
+  };
+  await fs.promises.writeFile(
+    path.join(originalRoot, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+    "utf8",
+  );
+}
+
 export async function installOptiScalerIntoGame(
   gamePath: string,
   options: InstallOptions,
   sink?: InstallerProgressSink,
 ): Promise<InstallResult> {
-  sink?.report({
-    phase: "download",
-    message: "Fetching latest OptiScaler release",
-    done: 1,
-    total: 6,
-  });
-  const { archivePath, releaseName } = await downloadLatestReleaseArchive();
-
-  sink?.report({
-    phase: "extract",
-    message: `Extracting ${releaseName}`,
-    done: 2,
-    total: 6,
-  });
-  const extractedRoot = await extractArchiveToTemp(archivePath);
-  const payload = await findPayloadRoot(extractedRoot);
+  const payload = await prepareLatestPayload(sink);
 
   const proxyFilename = normalizeProxyFilename(options.proxyFilename);
   const backupRoot = path.join(
@@ -336,6 +514,11 @@ export async function installOptiScalerIntoGame(
   const notes: string[] = [];
   const backedUpEntries = new Set<string>();
   const createdEntries = new Set<string>();
+
+  if (options.preserveOriginalState) {
+    await createOriginalStateSnapshot(gamePath, proxyFilename, payloadEntries);
+    notes.push("Preserved the original game state for future restore.");
+  }
 
   sink?.report({
     phase: "backup",
@@ -419,10 +602,11 @@ export async function installOptiScalerIntoGame(
     proxyFilename,
     backupRoot,
     sourceRoot: payload.root,
-    releaseName,
+    releaseName: payload.releaseName,
     notes,
     backedUpEntries: Array.from(backedUpEntries).sort(),
     createdEntries: Array.from(createdEntries).sort(),
+    preserveOriginalState: options.preserveOriginalState,
   };
   await fs.promises.writeFile(
     path.join(backupRoot, "manifest.json"),
@@ -450,25 +634,23 @@ export async function restoreOptiScalerFromGame(
   gamePath: string,
 ): Promise<InstallResult> {
   const backupFolder = path.join(gamePath, BACKUP_FOLDER);
-  const folders: fs.Dirent[] = await fs.promises
-    .readdir(backupFolder, { withFileTypes: true })
-    .catch(() => [] as fs.Dirent[]);
-  const backupCandidate = folders
-    .filter((entry: fs.Dirent) => entry.isDirectory())
-    .sort((a: fs.Dirent, b: fs.Dirent) => b.name.localeCompare(a.name))[0];
+  const snapshots = await getBackupSnapshots(gamePath);
+  const originalSnapshot = snapshots.find(
+    (snapshot) => snapshot.name === ORIGINAL_STATE_FOLDER,
+  );
+  const latestSnapshot = snapshots
+    .filter((snapshot) => snapshot.name !== ORIGINAL_STATE_FOLDER)
+    .sort((left, right) => right.name.localeCompare(left.name))[0];
 
-  if (!backupCandidate) {
+  if (!originalSnapshot && !latestSnapshot) {
     throw new Error("No OptiScaler backup was found for this game.");
   }
 
-  const backupRoot = path.join(backupFolder, backupCandidate.name);
-  const manifestPath = path.join(backupRoot, "manifest.json");
-  const manifest = JSON.parse(
-    await fs.promises.readFile(manifestPath, "utf8"),
-  ) as BackupManifest;
+  const restoreSnapshot = originalSnapshot ?? latestSnapshot!;
 
   const installedFiles = new Set([
-    manifest.proxyFilename,
+    latestSnapshot?.manifest.proxyFilename ??
+      restoreSnapshot.manifest.proxyFilename,
     "OptiScaler.dll",
     "OptiScaler.ini",
     "OptiScaler.log",
@@ -480,21 +662,24 @@ export async function restoreOptiScalerFromGame(
     "dlssg_to_fsr3_amd_is_better.dll",
     "dlssg_to_fsr3.log",
     "Remove OptiScaler.bat",
-    ...(manifest.createdEntries ?? []),
-    ...(manifest.backedUpEntries ?? []),
+    ...snapshots.flatMap((snapshot) => [
+      snapshot.manifest.proxyFilename,
+      ...(snapshot.manifest.createdEntries ?? []),
+      ...(snapshot.manifest.backedUpEntries ?? []),
+    ]),
   ]);
 
   for (const relativePath of installedFiles) {
     await removePathIfPresent(path.join(gamePath, relativePath));
   }
 
-  const restoreEntries = await fs.promises.readdir(backupRoot, {
+  const restoreEntries = await fs.promises.readdir(restoreSnapshot.root, {
     withFileTypes: true,
   });
   for (const entry of restoreEntries) {
     if (entry.name === "manifest.json") continue;
     await restorePathRecursive(
-      path.join(backupRoot, entry.name),
+      path.join(restoreSnapshot.root, entry.name),
       path.join(gamePath, entry.name),
     );
   }
@@ -503,11 +688,13 @@ export async function restoreOptiScalerFromGame(
     gameId: gamePath,
     gameTitle: path.basename(gamePath),
     installedTo: gamePath,
-    proxyFilename: manifest.proxyFilename,
+    proxyFilename: restoreSnapshot.manifest.proxyFilename,
     restored: true,
     notes: [
-      "Restored the most recent OptiScaler backup.",
-      ...(manifest.notes ?? []),
+      originalSnapshot
+        ? "Restored the preserved original game state."
+        : "Restored the most recent OptiScaler backup.",
+      ...(restoreSnapshot.manifest.notes ?? []),
     ],
   };
 }

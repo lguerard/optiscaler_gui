@@ -78,9 +78,13 @@ app.whenReady().then(() => {
         );
       }
 
-      return installOptiScalerIntoGame(game.installPath, options, {
-        report: sendProgress,
-      });
+      return installOptiScalerIntoGame(
+        path.dirname(game.executablePath),
+        options,
+        {
+          report: sendProgress,
+        },
+      );
     },
   );
 
@@ -96,7 +100,7 @@ app.whenReady().then(() => {
       );
     }
 
-    return restoreOptiScalerFromGame(game.installPath);
+    return restoreOptiScalerFromGame(path.dirname(game.executablePath));
   });
 
   ipcMain.handle(
@@ -112,7 +116,7 @@ app.whenReady().then(() => {
 
       for (const game of games) {
         const result = await installOptiScalerIntoGame(
-          game.installPath,
+          path.dirname(game.executablePath),
           options,
           {
             report: sendProgress,

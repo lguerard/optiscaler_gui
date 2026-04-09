@@ -47,6 +47,11 @@ type LibraryViewMode = "grid" | "list";
 
 const THEME_STORAGE_KEY = "optiscaler-theme";
 const LIBRARY_VIEW_STORAGE_KEY = "optiscaler-library-view";
+const GAME_CACHE_ENABLED_STORAGE_KEY = "optiscaler-game-cache-enabled";
+const GAME_CACHE_STORAGE_KEY = "optiscaler-game-cache";
+const SELECTED_GAME_STORAGE_KEY = "optiscaler-selected-game";
+const PRESERVE_ORIGINAL_STATE_STORAGE_KEY =
+  "optiscaler-preserve-original-state";
 
 function formatConfidence(confidence: number): string {
   return `${Math.round(confidence * 100)}%`;
@@ -64,6 +69,21 @@ function getProxyGuide(proxyFilename: ProxyFilename): string {
 function formatCompatibilityList(values?: string[]): string {
   if (!values || values.length === 0) return "Not listed";
   return values.join(", ");
+}
+
+function formatCompatibilityInputs(
+  primary?: string[],
+  fallback?: string[],
+): string {
+  if (primary && primary.length > 0) {
+    return primary.join(", ");
+  }
+
+  if (fallback && fallback.length > 0) {
+    return `${fallback.join(", ")} (detected locally)`;
+  }
+
+  return "Not listed";
 }
 
 function formatDetectionEvidence(values?: string[]): string {
@@ -147,6 +167,41 @@ function getInitialLibraryView(): LibraryViewMode {
   return savedView === "list" ? "list" : "grid";
 }
 
+function getInitialBoolean(storageKey: string, fallback: boolean): boolean {
+  const savedValue = window.localStorage.getItem(storageKey);
+  if (savedValue === null) {
+    return fallback;
+  }
+
+  return savedValue === "true";
+}
+
+function getInitialCachedGames(): DiscoveredGame[] {
+  if (!getInitialBoolean(GAME_CACHE_ENABLED_STORAGE_KEY, true)) {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(GAME_CACHE_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as DiscoveredGame[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function getInitialSelectedGameId(): string | null {
+  if (!getInitialBoolean(GAME_CACHE_ENABLED_STORAGE_KEY, true)) {
+    return null;
+  }
+
+  return window.localStorage.getItem(SELECTED_GAME_STORAGE_KEY);
+}
+
 function ThemeToggleIcon({ theme }: { theme: ThemeMode }) {
   if (theme === "dark") {
     return (
@@ -175,8 +230,15 @@ export default function App() {
   const [libraryView, setLibraryView] = useState<LibraryViewMode>(() =>
     getInitialLibraryView(),
   );
-  const [games, setGames] = useState<DiscoveredGame[]>([]);
-  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
+  const [useDiscoveryCache, setUseDiscoveryCache] = useState<boolean>(() =>
+    getInitialBoolean(GAME_CACHE_ENABLED_STORAGE_KEY, true),
+  );
+  const [games, setGames] = useState<DiscoveredGame[]>(() =>
+    getInitialCachedGames(),
+  );
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(() =>
+    getInitialSelectedGameId(),
+  );
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [proxyFilename, setProxyFilename] = useState<ProxyFilename>("dxgi.dll");
   const [gpuVendor, setGpuVendor] = useState<"amd-intel" | "nvidia">(
@@ -184,8 +246,17 @@ export default function App() {
   );
   const [enableSpoofing, setEnableSpoofing] = useState(true);
   const [installOptiPatcher, setInstallOptiPatcher] = useState(false);
+  const [preserveOriginalState, setPreserveOriginalState] = useState<boolean>(
+    () => getInitialBoolean(PRESERVE_ORIGINAL_STATE_STORAGE_KEY, true),
+  );
   const [progress, setProgress] = useState<InstallProgress | null>(null);
-  const [logEntries, setLogEntries] = useState<string[]>([]);
+  const [logEntries, setLogEntries] = useState<string[]>(() =>
+    getInitialCachedGames().length > 0
+      ? [
+          `Loaded ${getInitialCachedGames().length} cached games while the library refresh runs.`,
+        ]
+      : [],
+  );
   const [busy, setBusy] = useState(false);
 
   const selectedGame = useMemo(
@@ -202,6 +273,33 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(LIBRARY_VIEW_STORAGE_KEY, libraryView);
   }, [libraryView]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      GAME_CACHE_ENABLED_STORAGE_KEY,
+      String(useDiscoveryCache),
+    );
+
+    if (!useDiscoveryCache) {
+      window.localStorage.removeItem(GAME_CACHE_STORAGE_KEY);
+      window.localStorage.removeItem(SELECTED_GAME_STORAGE_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(GAME_CACHE_STORAGE_KEY, JSON.stringify(games));
+    if (selectedGameId) {
+      window.localStorage.setItem(SELECTED_GAME_STORAGE_KEY, selectedGameId);
+    } else {
+      window.localStorage.removeItem(SELECTED_GAME_STORAGE_KEY);
+    }
+  }, [games, selectedGameId, useDiscoveryCache]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      PRESERVE_ORIGINAL_STATE_STORAGE_KEY,
+      String(preserveOriginalState),
+    );
+  }, [preserveOriginalState]);
 
   useEffect(() => {
     const unsubscribe = window.optiScaler.onProgress((entry) => {
@@ -237,6 +335,14 @@ export default function App() {
     }
   }, [gpuVendor]);
 
+  useEffect(() => {
+    if (selectedGameId && games.some((game) => game.id === selectedGameId)) {
+      return;
+    }
+
+    setSelectedGameId(games[0]?.id ?? null);
+  }, [games, selectedGameId]);
+
   async function refreshGames() {
     setBusy(true);
     try {
@@ -268,6 +374,7 @@ export default function App() {
         proxyFilename,
         enableSpoofing,
         installOptiPatcher,
+        preserveOriginalState,
       });
       setLogEntries((current) =>
         [
@@ -294,6 +401,7 @@ export default function App() {
         proxyFilename,
         enableSpoofing,
         installOptiPatcher,
+        preserveOriginalState,
       });
       setLogEntries((current) =>
         [
@@ -398,6 +506,15 @@ export default function App() {
               List
             </button>
           </div>
+
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={useDiscoveryCache}
+              onChange={(event) => setUseDiscoveryCache(event.target.checked)}
+            />
+            <span>Use cached library on startup</span>
+          </label>
         </div>
 
         <div
@@ -638,6 +755,16 @@ export default function App() {
                   />
                   <span>Download OptiPatcher when available</span>
                 </label>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={preserveOriginalState}
+                    onChange={(event) =>
+                      setPreserveOriginalState(event.target.checked)
+                    }
+                  />
+                  <span>Preserve original file state for restore</span>
+                </label>
               </div>
             </div>
           )}
@@ -768,16 +895,18 @@ export default function App() {
                     <div className="compatibility-summary-row">
                       <span>Upscaler inputs</span>
                       <strong>
-                        {formatCompatibilityList(
+                        {formatCompatibilityInputs(
                           selectedGame.compatibility.upscalerInputs,
+                          selectedGame.detectedGraphics?.upscalers,
                         )}
                       </strong>
                     </div>
                     <div className="compatibility-summary-row">
                       <span>FG inputs</span>
                       <strong>
-                        {formatCompatibilityList(
+                        {formatCompatibilityInputs(
                           selectedGame.compatibility.fgInputs,
+                          selectedGame.detectedGraphics?.frameGeneration,
                         )}
                       </strong>
                     </div>

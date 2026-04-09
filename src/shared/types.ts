@@ -67,6 +67,7 @@ export interface InstallOptions {
   proxyFilename: ProxyFilename;
   enableSpoofing: boolean;
   installOptiPatcher: boolean;
+  preserveOriginalState: boolean;
 }
 
 export interface InstallProgress {
